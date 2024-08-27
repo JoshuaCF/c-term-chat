@@ -7,8 +7,8 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <netinet/in.h>
+#include <sys/poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -85,7 +85,21 @@ struct ServerState {
 	int sfd_receiver;
 	bool shutdown;
 	struct DynamicArray connections;
+	struct DynamicArray pollfds;
 };
+
+void rebuildPollFDs(struct ServerState* state) {
+	DynamicArray_clear(&state->pollfds);
+
+	struct Connection* connections = state->connections.data;
+	for (size_t i = 0; i < state->connections.num_elements; i++) {
+		struct Connection* cur_connection = &connections[i];
+		struct pollfd pfd = {0};
+		pfd.fd = cur_connection->socket;
+		pfd.events = POLLIN | POLLPRI;
+		DynamicArray_push(&state->pollfds, &pfd);
+	}
+}
 
 void acceptLoop(struct ServerState* state) {
 	unsigned int next_id = 0;
@@ -97,8 +111,6 @@ void acceptLoop(struct ServerState* state) {
 			continue;
 		}
 
-		fcntl(socket, F_SETFL, fcntl(socket, F_GETFL) | O_NONBLOCK);
-
 		struct Connection new_connection = {0};
 		new_connection.state = CONNECTION_WAITING;
 		new_connection.socket = socket;
@@ -108,25 +120,36 @@ void acceptLoop(struct ServerState* state) {
 
 		mtx_lock(&state->mutex);
 		DynamicArray_push(&state->connections, &new_connection);
+		rebuildPollFDs(state);
 		mtx_unlock(&state->mutex);
+		thrd_yield();
 	}
 }
 
+#define POLL_TIMEOUT_MS 100
 void pollLoop(struct ServerState* state) {
+	// It would be good to make this work with select()
+	struct DynamicArray removal_list = DynamicArray_new(sizeof(size_t), 1);
 	while(true) {
 		if (state->shutdown) break;
 
 		mtx_lock(&state->mutex);
+		int num_ready = poll(state->pollfds.data, state->pollfds.num_elements, POLL_TIMEOUT_MS);
+		if (num_ready == 0) goto unlock;
 
 		struct Connection* connections = state->connections.data;
+		struct pollfd* pollfds = state->pollfds.data;
 		for (size_t i = 0; i < state->connections.num_elements; i++) {
+			struct pollfd* cur_pollfd = &pollfds[i];
+			if (!(cur_pollfd->revents & (POLLIN | POLLPRI))) continue;
+
 			struct Connection* cur_connection = &connections[i];
+
 			updateConnection(cur_connection);
 			if (cur_connection->state == CONNECTION_CLOSED) {
 				printf("Connection %u closed, removing\n", cur_connection->id);
 				cleanupConnection(cur_connection);
-				DynamicArray_remove(&state->connections, i);
-				i--;
+				DynamicArray_push(&removal_list, &i);
 			}
 
 			if (cur_connection->state == CONNECTION_MSG_COMPLETE) {
@@ -139,8 +162,25 @@ void pollLoop(struct ServerState* state) {
 			}
 		}
 
+		if (removal_list.num_elements == 0) goto unlock;
+
+		printf("To remove: %u\n", removal_list.num_elements);
+		// Removing from back to front will not cause reordering of data before removal
+		size_t* removal_indices = removal_list.data;
+		for (unsigned int i = removal_list.num_elements; i > 0; i--) {
+			size_t removal_index = removal_indices[i-1];
+			DynamicArray_remove(&state->connections, removal_index);
+		}
+		rebuildPollFDs(state);
+		DynamicArray_clear(&removal_list);
+
+		unlock:
 		mtx_unlock(&state->mutex);
+		
+		fflush(stdout);
+		thrd_yield();
 	}
+	DynamicArray_free(&removal_list);
 }
 
 int server(uint16_t port) {
@@ -174,10 +214,13 @@ int server(uint16_t port) {
 	}
 	state.sfd_receiver = sfd_receiver;
 	state.shutdown = false;
+	// This is set to 1 so I can find issues with it as soon as possible
+	// My dynamic array is relatively untested
 	state.connections = DynamicArray_new(sizeof(struct Connection), 1);
+	state.pollfds = DynamicArray_new(sizeof(struct pollfd), 1);
 	
 	thrd_t accept_thread;
-	if (thrd_create(&accept_thread, acceptLoop, &state) != thrd_success) {
+	if (thrd_create(&accept_thread, (thrd_start_t)acceptLoop, &state) != thrd_success) {
 		printf("Failed to create acception thread.\n");
 		return 1;
 	}
@@ -187,6 +230,7 @@ int server(uint16_t port) {
 
 	mtx_destroy(&state.mutex);
 	DynamicArray_free(&state.connections);
+	DynamicArray_free(&state.pollfds);
 
 	printf("Joining...\n");
 	thrd_join(accept_thread, NULL);

@@ -16,4 +16,6 @@ struct DynamicArray {
 struct DynamicArray DynamicArray_new(size_t item_size, unsigned int capacity);
 void DynamicArray_push(struct DynamicArray* array, void* item);
 void DynamicArray_remove(struct DynamicArray* array, size_t index);
+void DynamicArray_removeOrdered(struct DynamicArray* array, size_t index);
+void DynamicArray_clear(struct DynamicArray* array);
 void DynamicArray_free(struct DynamicArray* array);
