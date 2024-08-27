@@ -39,6 +39,7 @@ void updateConnection(struct Connection* connection) {
 			size_t bytes_remaining = sizeof(uint32_t) - connection->bytes_read;
 
 			ssize_t bytes = recv(connection->socket, destination, bytes_remaining, 0b0);
+			printf("Connection %u received %ld bytes\n", connection->id, bytes);
 			if (bytes > 0) {
 				connection->bytes_read += bytes;
 			} else if ((bytes == -1 && errno != EAGAIN && errno != EWOULDBLOCK) || bytes == 0) {
@@ -51,6 +52,7 @@ void updateConnection(struct Connection* connection) {
 			if (connection->msg_length > CONNECTION_BFR_SIZE-1) connection->msg_length = CONNECTION_BFR_SIZE-1;
 			connection->bytes_read = 0;
 			connection->state = CONNECTION_READING;
+			printf("Connection %u awaiting msg of length %u\n", connection->id, connection->msg_length);
 		}
 		case CONNECTION_READING: {
 			void* destination = connection->bfr + connection->bytes_read;
@@ -176,9 +178,6 @@ void pollLoop(struct ServerState* state) {
 
 		unlock:
 		mtx_unlock(&state->mutex);
-		
-		fflush(stdout);
-		thrd_yield();
 	}
 	DynamicArray_free(&removal_list);
 }
