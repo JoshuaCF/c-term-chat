@@ -14,6 +14,8 @@
 
 #include "dyn_arr.h"
 
+#include "defs.h"
+
 #include "server.h"
 
 enum ConnectionReadState {
@@ -22,11 +24,10 @@ enum ConnectionReadState {
 	CONNECTION_MSG_COMPLETE,
 	CONNECTION_CLOSED,
 };
-#define CONNECTION_BFR_SIZE 512
 struct Connection {
 	unsigned int id;
 	int socket;
-	char bfr[CONNECTION_BFR_SIZE];
+	char bfr[SEGMENT_MAX_SIZE];
 	uint32_t msg_length;
 	uint32_t bytes_read;
 	enum ConnectionReadState state;
@@ -48,7 +49,7 @@ void updateConnection(struct Connection* connection) {
 
 			if (connection->bytes_read != sizeof(uint32_t)) return;
 			connection->msg_length = ntohl(*(uint32_t*)connection->bfr);
-			if (connection->msg_length > CONNECTION_BFR_SIZE-1) connection->msg_length = CONNECTION_BFR_SIZE-1;
+			if (connection->msg_length > SEGMENT_MAX_SIZE-1) connection->msg_length = SEGMENT_MAX_SIZE-1;
 			connection->bytes_read = 0;
 			connection->state = CONNECTION_READING;
 		}
@@ -115,7 +116,7 @@ void acceptLoop(struct ServerState* state) {
 void pollLoop(struct ServerState* state) {
 	while(true) {
 		if (state->shutdown) break;
-
+ 
 		mtx_lock(&state->mutex);
 
 		struct Connection* connections = state->connections.data;
@@ -140,6 +141,7 @@ void pollLoop(struct ServerState* state) {
 		}
 
 		mtx_unlock(&state->mutex);
+		thrd_yield();
 	}
 }
 
@@ -177,7 +179,7 @@ int server(uint16_t port) {
 	state.connections = DynamicArray_new(sizeof(struct Connection), 1);
 	
 	thrd_t accept_thread;
-	if (thrd_create(&accept_thread, acceptLoop, &state) != thrd_success) {
+	if (thrd_create(&accept_thread, (thrd_start_t)acceptLoop, &state) != thrd_success) {
 		printf("Failed to create acception thread.\n");
 		return 1;
 	}
