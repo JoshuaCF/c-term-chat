@@ -91,11 +91,13 @@ struct ClientState {
 	struct Connection connection;
 	char input_bfr[256];
 	bool input_ready;
+	bool shutdown;
 };
 
 static void inputLoop(struct ClientState* state) {
 	while (true) {
 		while (state->input_ready) { usleep(10000); }
+		if (state->shutdown) break;
 
 		fgets(state->input_bfr, 256, stdin);
 		unsigned long msg_len = strlen(state->input_bfr);
@@ -106,13 +108,11 @@ static void inputLoop(struct ClientState* state) {
 
 static void displayMessage(struct ClientState* state) {
 	cursorSavePosition();
-	fflush(stdout);
 
 	cursorMoveToOrigin();
 	printf("%s", state->connection.bfr);
 
 	cursorRestorePosition();
-	fflush(stdout);
 }
 
 int client(uint32_t ip, uint16_t port) {
@@ -152,10 +152,16 @@ int client(uint32_t ip, uint16_t port) {
 
 		if (state.connection.state == CONNECTION_MSG_COMPLETE) {
 			displayMessage(&state);
+			state.connection.state = CONNECTION_WAITING;
+			fflush(stdout);
 		}
 		
 		if (state.input_ready) {
-			if (strcmp(state.input_bfr, "exit") == 0) break;
+			if (strcmp(state.input_bfr, "exit") == 0) {
+				state.shutdown = true;
+				state.input_ready = false;
+				break;
+			}
 
 			sendMessage(state.input_bfr, state.connection.socket);
 			cursorMoveTo(5, 1);
