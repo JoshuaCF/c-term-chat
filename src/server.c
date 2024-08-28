@@ -33,7 +33,7 @@ struct Connection {
 	enum ConnectionReadState state;
 };
 
-void updateConnection(struct Connection* connection) {
+static void updateConnection(struct Connection* connection) {
 	switch (connection->state) {
 		case CONNECTION_WAITING: {
 			void* destination = connection->bfr + connection->bytes_read;
@@ -77,7 +77,7 @@ void updateConnection(struct Connection* connection) {
 	}
 }
 
-void cleanupConnection(struct Connection* connection) {
+static void cleanupConnection(struct Connection* connection) {
 	close(connection->socket);
 }
 
@@ -88,7 +88,7 @@ struct ServerState {
 	struct DynamicArray connections;
 };
 
-void acceptLoop(struct ServerState* state) {
+static void acceptLoop(struct ServerState* state) {
 	unsigned int next_id = 0;
 	while(true) {
 		int socket = accept(state->sfd_receiver, NULL, NULL);
@@ -113,7 +113,25 @@ void acceptLoop(struct ServerState* state) {
 	}
 }
 
-void pollLoop(struct ServerState* state) {
+static void broadcastMessage(struct ServerState* state, char* message) {
+	char data[SEGMENT_MAX_SIZE];
+	void* write_pos = data;
+	unsigned long msg_len = strlen(message);
+	*(uint32_t*)write_pos = htonl(msg_len);
+	write_pos += sizeof(uint32_t);
+	memcpy(write_pos, message, msg_len);
+	write_pos += msg_len;
+	
+	size_t data_size = write_pos - (void*)data;
+
+	struct Connection* connections = state->connections.data;
+	for (size_t i = 0; i < state->connections.num_elements; i++) {
+		struct Connection* cur_connection = &connections[i];
+		send(cur_connection->socket, data, data_size, 0b0);
+	}
+}
+
+static void pollLoop(struct ServerState* state) {
 	while(true) {
 		if (state->shutdown) break;
  
@@ -132,6 +150,7 @@ void pollLoop(struct ServerState* state) {
 
 			if (cur_connection->state == CONNECTION_MSG_COMPLETE) {
 				printf("Connection %u message: %s\n", cur_connection->id, cur_connection->bfr);
+				broadcastMessage(state, cur_connection->bfr);
 				cur_connection->state = CONNECTION_WAITING;
 				if (strcmp(cur_connection->bfr, "close") == 0) {
 					state->shutdown = true;
