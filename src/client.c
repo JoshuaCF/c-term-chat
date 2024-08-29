@@ -52,7 +52,7 @@ static void updateConnection(struct Connection* connection) {
 			ssize_t bytes = recv(connection->socket, destination, bytes_remaining, 0b0);
 			if (bytes > 0) {
 				connection->bytes_read += bytes;
-			} else if ((bytes == -1 && errno != EAGAIN && errno != EWOULDBLOCK) || bytes == 0) {
+			} else if ((bytes == -1 && errno != EWOULDBLOCK) || bytes == 0) {
 				connection->state = CONNECTION_CLOSED;
 				return;
 			}
