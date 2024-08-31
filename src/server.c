@@ -14,72 +14,9 @@
 
 #include "dyn_arr.h"
 
-#include "defs.h"
+#include "networking.h"
 
 #include "server.h"
-
-enum ConnectionReadState {
-	CONNECTION_WAITING,
-	CONNECTION_READING,
-	CONNECTION_MSG_COMPLETE,
-	CONNECTION_CLOSED,
-};
-struct Connection {
-	unsigned int id;
-	int socket;
-	char bfr[SEGMENT_MAX_SIZE];
-	uint32_t msg_length;
-	uint32_t bytes_read;
-	enum ConnectionReadState state;
-};
-
-static void updateConnection(struct Connection* connection) {
-	switch (connection->state) {
-		case CONNECTION_WAITING: {
-			void* destination = connection->bfr + connection->bytes_read;
-			size_t bytes_remaining = sizeof(uint32_t) - connection->bytes_read;
-
-			ssize_t bytes = recv(connection->socket, destination, bytes_remaining, 0b0);
-			if (bytes > 0) {
-				connection->bytes_read += bytes;
-			} else if ((bytes == -1 && errno != EAGAIN && errno != EWOULDBLOCK) || bytes == 0) {
-				connection->state = CONNECTION_CLOSED;
-				return;
-			}
-
-			if (connection->bytes_read != sizeof(uint32_t)) return;
-			connection->msg_length = ntohl(*(uint32_t*)connection->bfr);
-			if (connection->msg_length > SEGMENT_MAX_SIZE-1) connection->msg_length = SEGMENT_MAX_SIZE-1;
-			connection->bytes_read = 0;
-			connection->state = CONNECTION_READING;
-		}
-		case CONNECTION_READING: {
-			void* destination = connection->bfr + connection->bytes_read;
-			size_t bytes_remaining = connection->msg_length - connection->bytes_read;
-
-			ssize_t bytes = recv(connection->socket, destination, bytes_remaining, 0b0);
-			if (bytes >= 0) {
-				connection->bytes_read += bytes;
-			} else if (bytes == -1 && errno != EAGAIN && errno != EWOULDBLOCK) {
-				connection->state = CONNECTION_CLOSED;
-				return;
-			}
-
-			if (connection->bytes_read != connection->msg_length) return;
-			connection->bfr[connection->msg_length] = '\0';
-			connection->bytes_read = 0;
-			connection->state = CONNECTION_MSG_COMPLETE;
-		}
-		case CONNECTION_MSG_COMPLETE:
-		break;
-		case CONNECTION_CLOSED:
-		break;
-	}
-}
-
-static void cleanupConnection(struct Connection* connection) {
-	close(connection->socket);
-}
 
 struct ServerState {
 	mtx_t mutex;
@@ -100,12 +37,8 @@ static void acceptLoop(struct ServerState* state) {
 
 		fcntl(socket, F_SETFL, fcntl(socket, F_GETFL) | O_NONBLOCK);
 
-		struct Connection new_connection = {0};
-		new_connection.state = CONNECTION_WAITING;
-		new_connection.socket = socket;
-		new_connection.id = next_id;
-		next_id++;
-		printf("Connection %u accepted\n", new_connection.id);
+		struct Connection new_connection = newConnection(socket);
+		printf("Connection %u accepted\n", new_connection.socket);
 
 		mtx_lock(&state->mutex);
 		DynamicArray_push(&state->connections, &new_connection);
@@ -113,22 +46,36 @@ static void acceptLoop(struct ServerState* state) {
 	}
 }
 
-static void broadcastMessage(struct ServerState* state, char* message) {
-	char data[SEGMENT_MAX_SIZE];
-	void* write_pos = data;
-	unsigned long msg_len = strlen(message);
-	*(uint32_t*)write_pos = htonl(msg_len);
-	write_pos += sizeof(uint32_t);
-	memcpy(write_pos, message, msg_len);
-	write_pos += msg_len;
-	
-	size_t data_size = write_pos - (void*)data;
-
+static void broadcastMessage(struct ServerState* state, char* sender, char* message) {
 	struct Connection* connections = state->connections.data;
 	for (size_t i = 0; i < state->connections.num_elements; i++) {
 		struct Connection* cur_connection = &connections[i];
-		send(cur_connection->socket, data, data_size, 0b0);
+		sendSegment_Message(cur_connection, sender, message);
 	}
+}
+
+static void handleSegment(struct ServerState* state, struct Connection* connection) {
+	switch (connection->segment_type) {
+		case SEGMENT_STATUS: {
+			printf("Status message received by the server..?\n");
+			break;
+		}
+		case SEGMENT_MESSAGE: {
+			struct Segment_Message* segment = connection->segment;
+			printf("Connection %u message: <%s> %s\n", connection->socket, segment->sender, segment->contents);
+			broadcastMessage(state, segment->sender, segment->contents);
+			if (strcmp(segment->contents, "close") == 0) {
+				state->shutdown = true;
+				printf("Shutting down server\n");
+			}
+			break;
+		}
+		default:
+			printf("Default segment type?\n");
+			break;
+	}
+
+	markHandled(connection);
 }
 
 static void pollLoop(struct ServerState* state) {
@@ -141,22 +88,15 @@ static void pollLoop(struct ServerState* state) {
 		for (size_t i = 0; i < state->connections.num_elements; i++) {
 			struct Connection* cur_connection = &connections[i];
 			updateConnection(cur_connection);
-			if (cur_connection->state == CONNECTION_CLOSED) {
-				printf("Connection %u closed, removing\n", cur_connection->id);
+			if (cur_connection->reader.closed) {
+				printf("Connection %u closed, removing\n", cur_connection->socket);
 				cleanupConnection(cur_connection);
 				DynamicArray_remove(&state->connections, i);
 				i--;
 			}
 
-			if (cur_connection->state == CONNECTION_MSG_COMPLETE) {
-				printf("Connection %u message: %s\n", cur_connection->id, cur_connection->bfr);
-				broadcastMessage(state, cur_connection->bfr);
-				cur_connection->state = CONNECTION_WAITING;
-				if (strcmp(cur_connection->bfr, "close") == 0) {
-					state->shutdown = true;
-					printf("Shutting down server\n");
-				}
-			}
+			if (cur_connection->segment_ready)
+				handleSegment(state, cur_connection);
 		}
 
 		mtx_unlock(&state->mutex);

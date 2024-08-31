@@ -13,79 +13,10 @@
 
 #include "term_ctrl.h"
 
-#include "defs.h"
+#include "networking.h"
 
 #include "client.h"
 
-static void sendMessage(char* msg, int socket) {
-	char bfr[SEGMENT_MAX_SIZE];
-	void* write_pos = bfr;
-	unsigned long msg_len = strlen(msg);
-
-	*(uint32_t*)write_pos = htonl(msg_len);
-	write_pos += sizeof(uint32_t);
-	memcpy(write_pos, msg, msg_len);
-	write_pos += msg_len;
-	send(socket, bfr, write_pos-(void*)bfr, 0b0);
-}
-
-enum ConnectionReadState {
-	CONNECTION_WAITING,
-	CONNECTION_READING,
-	CONNECTION_MSG_COMPLETE,
-	CONNECTION_CLOSED,
-};
-struct Connection {
-	int socket;
-	char bfr[SEGMENT_MAX_SIZE];
-	uint32_t msg_length;
-	uint32_t bytes_read;
-	enum ConnectionReadState state;
-};
-
-static void updateConnection(struct Connection* connection) {
-	switch (connection->state) {
-		case CONNECTION_WAITING: {
-			void* destination = connection->bfr + connection->bytes_read;
-			size_t bytes_remaining = sizeof(uint32_t) - connection->bytes_read;
-
-			ssize_t bytes = recv(connection->socket, destination, bytes_remaining, 0b0);
-			if (bytes > 0) {
-				connection->bytes_read += bytes;
-			} else if ((bytes == -1 && errno != EWOULDBLOCK) || bytes == 0) {
-				connection->state = CONNECTION_CLOSED;
-				return;
-			}
-
-			if (connection->bytes_read != sizeof(uint32_t)) return;
-			connection->msg_length = ntohl(*(uint32_t*)connection->bfr);
-			if (connection->msg_length > SEGMENT_MAX_SIZE-1) connection->msg_length = SEGMENT_MAX_SIZE-1;
-			connection->bytes_read = 0;
-			connection->state = CONNECTION_READING;
-		}
-		case CONNECTION_READING: {
-			void* destination = connection->bfr + connection->bytes_read;
-			size_t bytes_remaining = connection->msg_length - connection->bytes_read;
-
-			ssize_t bytes = recv(connection->socket, destination, bytes_remaining, 0b0);
-			if (bytes >= 0) {
-				connection->bytes_read += bytes;
-			} else if (bytes == -1 && errno != EAGAIN && errno != EWOULDBLOCK) {
-				connection->state = CONNECTION_CLOSED;
-				return;
-			}
-
-			if (connection->bytes_read != connection->msg_length) return;
-			connection->bfr[connection->msg_length] = '\0';
-			connection->bytes_read = 0;
-			connection->state = CONNECTION_MSG_COMPLETE;
-		}
-		case CONNECTION_MSG_COMPLETE:
-		break;
-		case CONNECTION_CLOSED:
-		break;
-	}
-}
 
 struct ClientState {
 	struct Connection connection;
@@ -106,13 +37,38 @@ static void inputLoop(struct ClientState* state) {
 	}
 }
 
-static void displayMessage(struct ClientState* state) {
+static void displayMessage(struct ClientState* state, char* msg) {
 	cursorSavePosition();
 
 	cursorMoveToOrigin();
-	printf("%s", state->connection.bfr);
+	printf("%s", msg);
+	displayEraseFromCursor();
 
 	cursorRestorePosition();
+	fflush(stdout);
+}
+
+static void handleSegment(struct ClientState* state) {
+	switch (state->connection.segment_type) {
+		case SEGMENT_MESSAGE: {
+			char bfr[SEGMENT_MAX_LENGTH + 40];
+			struct Segment_Message* segment = state->connection.segment;
+			sprintf(bfr, "<%s> %s", segment->sender, segment->contents);
+			displayMessage(state, bfr);
+			break;
+		}
+		case SEGMENT_STATUS: {
+			char bfr[SEGMENT_MAX_LENGTH + 40];
+			struct Segment_Status* segment = state->connection.segment;
+			sprintf(bfr, "<SERVER> %s", segment->status);
+			displayMessage(state, bfr);
+			break;
+		}
+		default:
+			printf("Default segment type?\n");
+			break;
+	}
+	markHandled(&state->connection);
 }
 
 int client(uint32_t ip, uint16_t port) {
@@ -130,9 +86,7 @@ int client(uint32_t ip, uint16_t port) {
 
 	fcntl(sfd_server, F_SETFL, fcntl(sfd_server, F_GETFL) | O_NONBLOCK);
 
-	struct Connection server_connection = {0};
-	server_connection.state = CONNECTION_WAITING;
-	server_connection.socket = sfd_server;
+	struct Connection server_connection = newConnection(sfd_server);
 
 	struct ClientState state = {0};
 	state.connection = server_connection;
@@ -150,11 +104,8 @@ int client(uint32_t ip, uint16_t port) {
 	while (true) {
 		updateConnection(&state.connection);
 
-		if (state.connection.state == CONNECTION_MSG_COMPLETE) {
-			displayMessage(&state);
-			state.connection.state = CONNECTION_WAITING;
-			fflush(stdout);
-		}
+		if (state.connection.segment_ready)
+			handleSegment(&state);
 		
 		if (state.input_ready) {
 			if (strcmp(state.input_bfr, "exit") == 0) {
@@ -163,13 +114,14 @@ int client(uint32_t ip, uint16_t port) {
 				break;
 			}
 
-			sendMessage(state.input_bfr, state.connection.socket);
+			sendSegment_Message(&state.connection, "client", state.input_bfr);
 			cursorMoveTo(5, 1);
 			displayEraseLine();
 			state.input_ready = false;
 			fflush(stdout);
 		}
 	}
+	cleanupConnection(&state.connection);
 	displayLeaveAltBuffer();
 	fflush(stdout);
 
