@@ -54,6 +54,14 @@ static void broadcastMessage(struct ServerState* state, char* sender, char* mess
 	}
 }
 
+static void broadcastStatus(struct ServerState* state, char* status) {
+	struct Connection* connections = state->connections.data;
+	for (size_t i = 0; i < state->connections.num_elements; i++) {
+		struct Connection* cur_connection = &connections[i];
+		sendSegment_Status(cur_connection, status);
+	}
+}
+
 static void handleSegment(struct ServerState* state, struct Connection* connection) {
 	switch (connection->segment_type) {
 		case SEGMENT_STATUS: {
@@ -102,6 +110,9 @@ static void pollLoop(struct ServerState* state) {
 		mtx_unlock(&state->mutex);
 		thrd_yield();
 	}
+	mtx_lock(&state->mutex);
+	broadcastStatus(state, "Server has shut down.");
+	mtx_unlock(&state->mutex);
 }
 
 int server(uint16_t port) {
@@ -147,6 +158,12 @@ int server(uint16_t port) {
 	shutdown(state.sfd_receiver, SHUT_RD);
 
 	mtx_destroy(&state.mutex);
+
+	struct Connection* connections = state.connections.data;
+	for (size_t i = 0; i < state.connections.num_elements; i++) {
+		struct Connection* cur_connection = &connections[i];
+		cleanupConnection(cur_connection);
+	}
 	DynamicArray_free(&state.connections);
 
 	printf("Joining...\n");

@@ -140,7 +140,7 @@ static bool sendBulk(struct Connection* connection, void* data, size_t bytes) {
 void sendSegment_Status(struct Connection* connection, char* status) {
 	char bfr[SEGMENT_MAX_LENGTH + sizeof(unsigned char) + sizeof(uint16_t)];
 	void* write_pos = bfr;
-	*(unsigned char*)write_pos = (unsigned char)SEGMENT_MESSAGE;
+	*(unsigned char*)write_pos = (unsigned char)SEGMENT_STATUS;
 	write_pos += 1;
 
 	uint16_t status_len = strlen(status);

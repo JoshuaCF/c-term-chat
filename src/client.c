@@ -18,11 +18,48 @@
 #include "client.h"
 
 
+#define LOG_LENGTH 50
+struct MessageLog {
+	char* history[LOG_LENGTH];
+	size_t write_index;
+	size_t msg_count;
+};
+char* getNthNewestMessage(struct MessageLog* log, size_t n) {
+	if (n > log->write_index) {
+		return log->history[log->write_index+LOG_LENGTH-n];
+	} else {
+		return log->history[log->write_index-n];
+	}
+}
+void appendMessage(struct MessageLog* log, char* message) {
+	if (log->msg_count == LOG_LENGTH)
+		free(log->history[log->write_index]);
+
+	log->history[log->write_index] = malloc(strlen(message));
+	strcpy(log->history[log->write_index], message);
+	log->write_index = (log->write_index+1) % LOG_LENGTH;
+
+	if (log->msg_count < LOG_LENGTH)
+		log->msg_count++;
+}
+void emptyLog(struct MessageLog* log) {
+	size_t erase_index = log->write_index;
+	for (size_t i = 0; i < log->msg_count; i++) {
+		erase_index--;
+		if (erase_index >= LOG_LENGTH) erase_index = LOG_LENGTH-1;
+		free(log->history[erase_index]);
+	}
+	log->write_index = 0;
+	log->msg_count = 0;
+}
+
 struct ClientState {
 	struct Connection connection;
 	char input_bfr[256];
 	bool input_ready;
 	bool shutdown;
+	size_t width, height;
+	struct MessageLog log;
 };
 
 static void inputLoop(struct ClientState* state) {
@@ -37,12 +74,22 @@ static void inputLoop(struct ClientState* state) {
 	}
 }
 
-static void displayMessage(struct ClientState* state, char* msg) {
+static void displayMessages(struct ClientState* state) {
 	cursorSavePosition();
 
-	cursorMoveToOrigin();
-	printf("%s", msg);
-	displayEraseFromCursor();
+	size_t cur_row = state->height-2;
+	size_t end_row = 1;
+	cursorMoveTo(cur_row, 1);
+	for (size_t i = 0; i < state->log.msg_count; i++) {
+		if (cur_row < end_row) break;
+
+		// TODO: This probably breaks if the message is longer than one line
+		printf("%s", getNthNewestMessage(&state->log, i+1));
+		displayEraseLineFromCursor();
+		cursorMoveUpToLeft(1);
+
+		cur_row--;
+	}
 
 	cursorRestorePosition();
 	fflush(stdout);
@@ -54,14 +101,14 @@ static void handleSegment(struct ClientState* state) {
 			char bfr[SEGMENT_MAX_LENGTH + 40];
 			struct Segment_Message* segment = state->connection.segment;
 			sprintf(bfr, "<%s> %s", segment->sender, segment->contents);
-			displayMessage(state, bfr);
+			appendMessage(&state->log, bfr);
 			break;
 		}
 		case SEGMENT_STATUS: {
 			char bfr[SEGMENT_MAX_LENGTH + 40];
 			struct Segment_Status* segment = state->connection.segment;
 			sprintf(bfr, "<SERVER> %s", segment->status);
-			displayMessage(state, bfr);
+			appendMessage(&state->log, bfr);
 			break;
 		}
 		default:
@@ -99,13 +146,21 @@ int client(uint32_t ip, uint16_t port) {
 
 	printf("Entering alt buffer\n");
 	displayEnterAltBuffer();
-	cursorMoveTo(5, 1);
 	fflush(stdout);
+
+	state.width = 80;
+	state.height = 15;
+
+	cursorMoveTo(state.height, 1);
+	fflush(stdout);
+
 	while (true) {
 		updateConnection(&state.connection);
 
-		if (state.connection.segment_ready)
+		if (state.connection.segment_ready) {
 			handleSegment(&state);
+			displayMessages(&state);
+		}
 		
 		if (state.input_ready) {
 			if (strcmp(state.input_bfr, "exit") == 0) {
@@ -115,13 +170,14 @@ int client(uint32_t ip, uint16_t port) {
 			}
 
 			sendSegment_Message(&state.connection, "client", state.input_bfr);
-			cursorMoveTo(5, 1);
+			cursorMoveTo(state.height, 1);
 			displayEraseLine();
 			state.input_ready = false;
 			fflush(stdout);
 		}
 	}
 	cleanupConnection(&state.connection);
+	emptyLog(&state.log);
 	displayLeaveAltBuffer();
 	fflush(stdout);
 
