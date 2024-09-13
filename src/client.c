@@ -128,6 +128,7 @@ int client(uint32_t ip, uint16_t port) {
 
 	if (connect(sfd_server, (struct sockaddr*)&server_address, sizeof(struct sockaddr_in)) != 0) {
 		printf("Failed to connect.\n");
+		printf("errno: %d\n", errno);
 		return 1;
 	}
 
